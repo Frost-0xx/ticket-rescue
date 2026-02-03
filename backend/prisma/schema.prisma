@@ -71,6 +71,8 @@ model Offer {
   priceMax      Int?     // cents
   priceRangeRaw String?
 
+  ticketsYn     Boolean?
+
   promoPercent  Int?     // nullable
   lastSeenAt    DateTime @default(now())
 

@@ -204,6 +204,7 @@ async function flushBatch(source, rows) {
         priceMin: r.priceMin,
         priceMax: r.priceMax,
         priceRangeRaw: r.priceRangeRaw,
+        ticketsYn: r.ticketsYn ?? undefined,
         lastSeenAt: new Date()
       },
       create: {
@@ -213,6 +214,7 @@ async function flushBatch(source, rows) {
         priceMin: r.priceMin,
         priceMax: r.priceMax,
         priceRangeRaw: r.priceRangeRaw,
+        ticketsYn: r.ticketsYn ?? null,
         lastSeenAt: new Date()
       }
     });

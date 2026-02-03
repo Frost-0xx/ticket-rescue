@@ -149,6 +149,7 @@ function shapeEvent(e) {
   const offers = (e.offers || []).map(o => ({
     source: o.source,
     url: o.url,
+    tickets_yn: o.ticketsYn,
     base_price_min: money(o.priceMin),
     base_price_max: money(o.priceMax),
     promo_percent: o.promoPercent,
@@ -177,7 +178,7 @@ function shapeEvent(e) {
     state: e.state,
     venue: e.venue,
     performers: performerNames,
-    tickets_yn: e.ticketsYn,
+    tickets_yn: offers.some(o => o.tickets_yn === true),
     offers
   };
 }
