@@ -178,7 +178,10 @@ function shapeEvent(e) {
     state: e.state,
     venue: e.venue,
     performers: performerNames,
-    tickets_yn: offers.some(o => o.tickets_yn === true),
+    tickets_yn:
+      offers.some(o => o.tickets_yn === true) ? true :
+      offers.some(o => o.tickets_yn === false) ? false :
+      null,
     offers
   };
 }
