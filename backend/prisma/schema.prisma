@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Source {
+  geturtix
+  tn
+  tl
+  sbs
+}
+
+model Event {
+  id          String   @id // EventID from feed
+  eventName   String?
+  dateDay     DateTime // UTC midnight of local date (no timezone guessing)
+  time24      String?  // "HH:mm"
+  datetimeRaw String?  // "MM/DD/YYYY HH:mm"
+
+  city        String?
+  cityNorm    String?
+  state       String?  // as in feed (full name)
+  stateNorm   String?
+  venue       String?
+  venueNorm   String?
+  country     String?  // optional, not used in matching
+
+  ticketsYn   Boolean? @default(true)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  performers  EventPerformer[]
+  offers      Offer[]
+
+  @@index([dateDay, cityNorm, stateNorm])
+}
+
+model Performer {
+  id            String  @id // PerformerID from feed
+  name          String?
+  performerNorm String?
+
+  events        EventPerformer[]
+
+  @@index([performerNorm])
+}
+
+model EventPerformer {
+  eventId     String
+  performerId String
+
+  event       Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  performer   Performer @relation(fields: [performerId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, performerId])
+  @@index([performerId])
+}
+
+model Offer {
+  id            String   @id @default(cuid())
+  source        Source
+  eventId       String
+  url           String
+
+  priceMin      Int?     // cents
+  priceMax      Int?     // cents
+  priceRangeRaw String?
+
+  promoPercent  Int?     // nullable
+  lastSeenAt    DateTime @default(now())
+
+  event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([source, eventId])
+  @@index([eventId])
+}

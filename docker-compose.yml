@@ -1,0 +1,28 @@
+services:
+  db:
+    image: postgres:16
+    container_name: ticket_rescue_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ticketrescue
+      POSTGRES_PASSWORD: ticketrescue
+      POSTGRES_DB: ticketrescue
+    volumes:
+      - ticket_rescue_pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: ticket_rescue_api
+    restart: unless-stopped
+    environment:
+      PORT: "3001"
+      DATABASE_URL: "postgresql://ticketrescue:ticketrescue@db:5432/ticketrescue?schema=public"
+    depends_on:
+      - db
+    ports:
+      - "3001:3001"
+
+volumes:
+  ticket_rescue_pgdata:
