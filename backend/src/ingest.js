@@ -162,7 +162,7 @@ async function main() {
     process.exit(1);
   }
 
-  const BATCH_SIZE = 200;
+  const BATCH_SIZE = 100;
   let batch = [];
   let processed = 0;
   let skipped = 0;
@@ -365,7 +365,9 @@ async function flushBatch(source, rows) {
         }
       });
     }
-  });
+  },
+  { timeout: 60000 }
+);
 }
 
 main().catch((e) => {
