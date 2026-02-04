@@ -162,7 +162,7 @@ async function main() {
     process.exit(1);
   }
 
-  const BATCH_SIZE = 1000;
+  const BATCH_SIZE = 200;
   let batch = [];
   let processed = 0;
   let skipped = 0;
