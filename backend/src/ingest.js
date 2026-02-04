@@ -308,8 +308,16 @@ async function flushBatch(source, rows) {
     // - master updates canonical fields
     // - non-master only ensures existence (no overwrites)
     if (isMaster) {
-      await upsertEventFromMaster(r, cityNorm, stateNorm, venueNorm);
-    } else {
+  const cleanR = {
+    ...r,
+    city: cleanDisplayText(r.city),
+    state: cleanDisplayText(r.state),
+    venue: cleanDisplayText(r.venue),
+    eventName: cleanDisplayText(r.eventName),
+  };
+
+  await upsertEventFromMaster(cleanR, cityNorm, stateNorm, venueNorm);
+  } else {
       await ensureEventExistsIfMissing(r, cityNorm, stateNorm, venueNorm);
     }
 
