@@ -155,7 +155,6 @@ async function flushBatch(source, rows) {
         country: r.country || undefined,
         venue: r.venue || undefined,
         venueNorm: venueNorm || undefined,
-        ticketsYn: r.ticketsYn ?? undefined
       },
       create: {
         id: r.eventId,
@@ -170,7 +169,6 @@ async function flushBatch(source, rows) {
         country: r.country || null,
         venue: r.venue || null,
         venueNorm,
-        ticketsYn: r.ticketsYn ?? true
       }
     });
 
