@@ -239,10 +239,9 @@ async function main() {
   await prisma.$disconnect();
 }
 
-async function ensureEventExistsIfMissing(r, cityNorm, stateNorm, venueNorm) {
-  // Create minimal event only if it doesn't exist.
-  // Non-master sources must not overwrite canonical fields.
-  await prisma.event.upsert({
+// NOTE: these are now transactional helpers - accept tx.
+async function ensureEventExistsIfMissingTx(tx, r, cityNorm, stateNorm, venueNorm) {
+  await tx.event.upsert({
     where: { id: r.eventId },
     update: {}, // no-op for non-master
     create: {
@@ -262,9 +261,8 @@ async function ensureEventExistsIfMissing(r, cityNorm, stateNorm, venueNorm) {
   });
 }
 
-async function upsertEventFromMaster(r, cityNorm, stateNorm, venueNorm) {
-  // Master source overwrites canonical Event fields.
-  await prisma.event.upsert({
+async function upsertEventFromMasterTx(tx, r, cityNorm, stateNorm, venueNorm) {
+  await tx.event.upsert({
     where: { id: r.eventId },
     update: {
       eventName: r.eventName || undefined,
@@ -299,76 +297,75 @@ async function upsertEventFromMaster(r, cityNorm, stateNorm, venueNorm) {
 async function flushBatch(source, rows) {
   const isMaster = source === MASTER_EVENT_SOURCE;
 
-  for (const r of rows) {
-    const cityNorm = normText(r.city);
-    const stateNorm = normText(r.state);
-    const venueNorm = normText(r.venue);
+  // One DB transaction per batch => drastically less fsync/IO pressure
+  await prisma.$transaction(async (tx) => {
+    for (const r of rows) {
+      const cityNorm = normText(r.city);
+      const stateNorm = normText(r.state);
+      const venueNorm = normText(r.venue);
 
-    // 1) Event:
-    // - master updates canonical fields
-    // - non-master only ensures existence (no overwrites)
-    if (isMaster) {
-  const cleanR = {
-    ...r,
-    city: cleanDisplayText(r.city),
-    state: cleanDisplayText(r.state),
-    venue: cleanDisplayText(r.venue),
-    eventName: cleanDisplayText(r.eventName),
-  };
+      // 1) Event
+      if (isMaster) {
+        const cleanR = {
+          ...r,
+          city: cleanDisplayText(r.city),
+          state: cleanDisplayText(r.state),
+          venue: cleanDisplayText(r.venue),
+          eventName: cleanDisplayText(r.eventName),
+        };
+        await upsertEventFromMasterTx(tx, cleanR, cityNorm, stateNorm, venueNorm);
+      } else {
+        await ensureEventExistsIfMissingTx(tx, r, cityNorm, stateNorm, venueNorm);
+      }
 
-  await upsertEventFromMaster(cleanR, cityNorm, stateNorm, venueNorm);
-  } else {
-      await ensureEventExistsIfMissing(r, cityNorm, stateNorm, venueNorm);
+      // 2) Performer
+      const performerNorm = normText(r.performerName);
+      await tx.performer.upsert({
+        where: { id: r.performerId },
+        update: {
+          name: r.performerName || undefined,
+          performerNorm: performerNorm || undefined
+        },
+        create: {
+          id: r.performerId,
+          name: r.performerName || null,
+          performerNorm: performerNorm || null
+        }
+      });
+
+      // 3) Join row
+      await tx.eventPerformer.upsert({
+        where: {
+          eventId_performerId: { eventId: r.eventId, performerId: r.performerId }
+        },
+        update: {},
+        create: { eventId: r.eventId, performerId: r.performerId }
+      });
+
+      // 4) Offer per source
+      await tx.offer.upsert({
+        where: { source_eventId: { source, eventId: r.eventId } },
+        update: {
+          url: r.url,
+          priceMin: r.priceMin,
+          priceMax: r.priceMax,
+          priceRangeRaw: r.priceRangeRaw,
+          ticketsYn: r.ticketsYn ?? undefined,
+          lastSeenAt: new Date()
+        },
+        create: {
+          source,
+          eventId: r.eventId,
+          url: r.url,
+          priceMin: r.priceMin,
+          priceMax: r.priceMax,
+          priceRangeRaw: r.priceRangeRaw,
+          ticketsYn: r.ticketsYn ?? null,
+          lastSeenAt: new Date()
+        }
+      });
     }
-
-    // 2) Performer (we allow updating performer name/norm for all sources;
-    // if you want, we can later restrict performer updates to master too.)
-    const performerNorm = normText(r.performerName);
-    await prisma.performer.upsert({
-      where: { id: r.performerId },
-      update: {
-        name: r.performerName || undefined,
-        performerNorm: performerNorm || undefined
-      },
-      create: {
-        id: r.performerId,
-        name: r.performerName || null,
-        performerNorm: performerNorm || null
-      }
-    });
-
-    // 3) Join row
-    await prisma.eventPerformer.upsert({
-      where: {
-        eventId_performerId: { eventId: r.eventId, performerId: r.performerId }
-      },
-      update: {},
-      create: { eventId: r.eventId, performerId: r.performerId }
-    });
-
-    // 4) Offer per source
-    await prisma.offer.upsert({
-      where: { source_eventId: { source, eventId: r.eventId } },
-      update: {
-        url: r.url,
-        priceMin: r.priceMin,
-        priceMax: r.priceMax,
-        priceRangeRaw: r.priceRangeRaw,
-        ticketsYn: r.ticketsYn ?? undefined,
-        lastSeenAt: new Date()
-      },
-      create: {
-        source,
-        eventId: r.eventId,
-        url: r.url,
-        priceMin: r.priceMin,
-        priceMax: r.priceMax,
-        priceRangeRaw: r.priceRangeRaw,
-        ticketsYn: r.ticketsYn ?? null,
-        lastSeenAt: new Date()
-      }
-    });
-  }
+  });
 }
 
 main().catch((e) => {
