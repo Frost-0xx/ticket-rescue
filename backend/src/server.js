@@ -20,15 +20,29 @@ app.use(express.json({ limit: "2mb" }));
  * Includes US states + DC + Canada provinces/territories
  */
 const STATE_CSV_PATH =
-  process.env.STATE_CSV_PATH || path.join(__dirname, "..", "data", "state_abbr.csv");
+  process.env.STATE_CSV_PATH ||
+  path.join(__dirname, "..", "data", "state_abbr.csv");
 
 const stateNameToAbbr = new Map(); // "texas" -> "TX"
 const stateAbbrToName = new Map(); // "tx" -> "Texas"
 
+function normText(s) {
+  if (!s) return null;
+  return String(s)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function loadStateMaps() {
   try {
     if (!fs.existsSync(STATE_CSV_PATH)) {
-      console.warn(`[states] CSV not found at ${STATE_CSV_PATH} (state matching will be best-effort)`);
+      console.warn(
+        `[states] CSV not found at ${STATE_CSV_PATH} (state matching will be best-effort)`
+      );
       return;
     }
 
@@ -51,23 +65,14 @@ function loadStateMaps() {
       if (abbrKey) stateAbbrToName.set(abbrKey, nameRaw);
     }
 
-    console.log(`[states] loaded: ${stateNameToAbbr.size} names, ${stateAbbrToName.size} abbrs`);
+    console.log(
+      `[states] loaded: ${stateNameToAbbr.size} names, ${stateAbbrToName.size} abbrs`
+    );
   } catch (e) {
     console.warn("[states] failed to load:", e?.message || e);
   }
 }
 loadStateMaps();
-
-function normText(s) {
-  if (!s) return null;
-  return String(s)
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 
 /**
  * Accepts:
@@ -105,7 +110,9 @@ function parseDateDayFromYMD(ymd) {
 
 function todayUtcMidnight() {
   const now = new Date();
-  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0));
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0)
+  );
 }
 
 function toTime12(time24) {
@@ -187,13 +194,26 @@ function extractPerformerFromTitle(rawTitle) {
   return t;
 }
 
+/**
+ * =========
+ * UPCOMING soft filters (MVP)
+ * =========
+ * Exclude "Parking" listings ONLY in upcoming-mode (no-date).
+ * We do NOT exclude it in exact mode, because user might be on a parking page.
+ */
+function upcomingExcludeWhere() {
+  return {
+    NOT: [{ eventName: { contains: "parking", mode: "insensitive" } }]
+  };
+}
+
 const MatchRequest = z.object({
   performer_query: z.string().optional().nullable(),
   raw_title: z.string().optional().nullable(),
   city: z.string().optional().nullable(),
   state: z.string().optional().nullable(),
   date_day: z.string().optional().nullable(), // YYYY-MM-DD
-  time_24: z.string().optional().nullable()   // HH:mm
+  time_24: z.string().optional().nullable() // HH:mm
 });
 
 app.get("/health", (_, res) => res.json({ ok: true }));
@@ -204,11 +224,15 @@ app.post("/match", async (req, res) => {
 
     // Option C: prefer performer_query, else extract from raw_title
     const performerFromQuery = String(input.performer_query || "").trim() || null;
-    const performerFromTitle = input.raw_title ? extractPerformerFromTitle(input.raw_title) : null;
+    const performerFromTitle = input.raw_title
+      ? extractPerformerFromTitle(input.raw_title)
+      : null;
     const performerPicked = performerFromQuery || performerFromTitle || null;
 
     const performerNorm = normText(performerPicked || "");
-    const performerWords = performerNorm ? performerNorm.split(" ").filter(Boolean) : [];
+    const performerWords = performerNorm
+      ? performerNorm.split(" ").filter(Boolean)
+      : [];
 
     const cityNorm = normText(input.city || "");
 
@@ -219,7 +243,9 @@ app.post("/match", async (req, res) => {
     const time24 = input.time_24 || null;
 
     // Fallback performer links always when we have performerPicked
-    const fb = performerPicked ? buildPerformerLinks(performerPicked) : { slug: null, links: null };
+    const fb = performerPicked
+      ? buildPerformerLinks(performerPicked)
+      : { slug: null, links: null };
     const fallback = performerPicked
       ? {
           performer_input: performerPicked,
@@ -232,7 +258,7 @@ app.post("/match", async (req, res) => {
     const today = todayUtcMidnight();
 
     // If date is provided but already in the past => treat as "no date"
-    const dateIsPast = dateDayRaw ? (dateDayRaw < today) : false;
+    const dateIsPast = dateDayRaw ? dateDayRaw < today : false;
     const dateDay = dateIsPast ? null : dateDayRaw;
 
     // We require at least performer + city for *any* useful response
@@ -241,7 +267,8 @@ app.post("/match", async (req, res) => {
         confidence: "low",
         reason: "missing_required_fields",
         matches: [],
-        hint: "Need (performer_query or raw_title) + city. date_day optional; state/time optional.",
+        hint:
+          "Need (performer_query or raw_title) + city. date_day optional; state/time optional.",
         fallback
       });
     }
@@ -260,7 +287,7 @@ app.post("/match", async (req, res) => {
         performers: {
           some: {
             performer: {
-              AND: performerWords.map(w => ({
+              AND: performerWords.map((w) => ({
                 performerNorm: { contains: w, mode: "insensitive" }
               }))
             }
@@ -276,7 +303,7 @@ app.post("/match", async (req, res) => {
 
       // 2) Fallback: match by Event title text (ALL words, case-insensitive)
       if (!events.length) {
-        const eventNameClauses = performerWords.map(w => ({
+        const eventNameClauses = performerWords.map((w) => ({
           eventName: { contains: w, mode: "insensitive" }
         }));
 
@@ -296,7 +323,7 @@ app.post("/match", async (req, res) => {
         // Tie-breaker by time if needed
         let filtered = events;
         if (events.length > 1 && time24) {
-          const byTime = events.filter(e => (e.time24 || "") === time24);
+          const byTime = events.filter((e) => (e.time24 || "") === time24);
           if (byTime.length) filtered = byTime;
         }
 
@@ -315,16 +342,20 @@ app.post("/match", async (req, res) => {
      * Mode 2: Upcoming events (performer + city, no date OR date was past OR exact failed)
      * - return up to 3 closest future events
      * - if more than 3 exist -> hint "add date for exact match"
+     * Soft filter: exclude "parking" in upcoming mode only.
      * ================
      */
+    const upcomingSoft = upcomingExcludeWhere();
+
     const upcomingWhereByPerformer = {
       cityNorm,
       ...(stateNorm ? { stateNorm } : {}),
       dateDay: { gte: today },
+      ...upcomingSoft,
       performers: {
         some: {
           performer: {
-            AND: performerWords.map(w => ({
+            AND: performerWords.map((w) => ({
               performerNorm: { contains: w, mode: "insensitive" }
             }))
           }
@@ -342,7 +373,7 @@ app.post("/match", async (req, res) => {
 
     // If nothing by performer join, try fallback by eventName contains
     if (!upcoming.length) {
-      const eventNameClauses = performerWords.map(w => ({
+      const eventNameClauses = performerWords.map((w) => ({
         eventName: { contains: w, mode: "insensitive" }
       }));
 
@@ -351,6 +382,7 @@ app.post("/match", async (req, res) => {
           cityNorm,
           ...(stateNorm ? { stateNorm } : {}),
           dateDay: { gte: today },
+          ...upcomingSoft,
           AND: eventNameClauses
         },
         include: { offers: true, performers: { include: { performer: true } } },
@@ -385,7 +417,7 @@ app.post("/match", async (req, res) => {
 });
 
 function shapeEvent(e) {
-  const offers = (e.offers || []).map(o => ({
+  const offers = (e.offers || []).map((o) => ({
     source: o.source,
     url: o.url,
     tickets_yn: o.ticketsYn,
@@ -406,7 +438,7 @@ function shapeEvent(e) {
   });
 
   const performerNames = (e.performers || [])
-    .map(ep => ep.performer?.name)
+    .map((ep) => ep.performer?.name)
     .filter(Boolean);
 
   return {
@@ -419,10 +451,11 @@ function shapeEvent(e) {
     state: e.state,
     venue: e.venue,
     performers: performerNames,
-    tickets_yn:
-      offers.some(o => o.tickets_yn === true) ? true :
-      offers.some(o => o.tickets_yn === false) ? false :
-      null,
+    tickets_yn: offers.some((o) => o.tickets_yn === true)
+      ? true
+      : offers.some((o) => o.tickets_yn === false)
+        ? false
+        : null,
     offers
   };
 }
