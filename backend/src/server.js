@@ -64,7 +64,7 @@ app.post("/match", async (req, res) => {
     const input = MatchRequest.parse(req.body);
 
     const performerNorm = normText(input.performer_query);
-    const performerWords = performerNorm ? performerNorm.split(" ") : [];
+    const performerWords = performerNorm ? performerNorm.split(" ").filter(Boolean) : [];
 
     const cityNorm = normText(input.city || "");
     const stateNorm = normText(input.state || "");
@@ -80,7 +80,7 @@ app.post("/match", async (req, res) => {
       });
     }
 
-    // 1) Primary strategy: match by linked Performer rows
+    // 1) Primary strategy: match by linked Performer rows (case-insensitive)
     const performerWhere = {
       dateDay,
       cityNorm,
@@ -89,7 +89,7 @@ app.post("/match", async (req, res) => {
         some: {
           performer: {
             AND: performerWords.map(w => ({
-              performerNorm: { contains: w }
+              performerNorm: { contains: w, mode: "insensitive" }
             }))
           }
         }
@@ -105,12 +105,10 @@ app.post("/match", async (req, res) => {
       take: 25
     });
 
-    // 2) Fallback strategy: match by Event name text
-    // This solves cases where the "artist" appears in Event title,
-    // but the linked Performer is a brand/festival/rodeo/etc.
+    // 2) Fallback strategy: match by Event title text (case-insensitive)
     if (!events.length) {
       const eventNameClauses = performerWords.map(w => ({
-        eventName: { contains: w }
+        eventName: { contains: w, mode: "insensitive" }
       }));
 
       events = await prisma.event.findMany({
