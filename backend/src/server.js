@@ -80,9 +80,8 @@ app.post("/match", async (req, res) => {
       });
     }
 
-    // Core matching logic:
-    // ALL words from performer_query must be present in performerNorm
-    const baseWhere = {
+    // 1) Primary strategy: match by linked Performer rows
+    const performerWhere = {
       dateDay,
       cityNorm,
       ...(stateNorm ? { stateNorm } : {}),
@@ -98,13 +97,36 @@ app.post("/match", async (req, res) => {
     };
 
     let events = await prisma.event.findMany({
-      where: baseWhere,
+      where: performerWhere,
       include: {
         offers: true,
         performers: { include: { performer: true } }
       },
       take: 25
     });
+
+    // 2) Fallback strategy: match by Event name text
+    // This solves cases where the "artist" appears in Event title,
+    // but the linked Performer is a brand/festival/rodeo/etc.
+    if (!events.length) {
+      const eventNameClauses = performerWords.map(w => ({
+        eventName: { contains: w }
+      }));
+
+      events = await prisma.event.findMany({
+        where: {
+          dateDay,
+          cityNorm,
+          ...(stateNorm ? { stateNorm } : {}),
+          AND: eventNameClauses
+        },
+        include: {
+          offers: true,
+          performers: { include: { performer: true } }
+        },
+        take: 25
+      });
+    }
 
     if (!events.length) {
       return res.json({
