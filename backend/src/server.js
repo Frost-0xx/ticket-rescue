@@ -52,9 +52,9 @@ function estAfterPromo(priceMinCents, promoPercent) {
 const MatchRequest = z.object({
   performer_query: z.string().min(1),
   city: z.string().optional().nullable(),
-  state: z.string().optional().nullable(),     // may be TX/Texas later; for now pass full if you have it
-  date_day: z.string().optional().nullable(),  // YYYY-MM-DD
-  time_24: z.string().optional().nullable()    // "HH:mm" if extracted from page
+  state: z.string().optional().nullable(),
+  date_day: z.string().optional().nullable(), // YYYY-MM-DD
+  time_24: z.string().optional().nullable()   // HH:mm
 });
 
 app.get("/health", (_, res) => res.json({ ok: true }));
@@ -64,13 +64,14 @@ app.post("/match", async (req, res) => {
     const input = MatchRequest.parse(req.body);
 
     const performerNorm = normText(input.performer_query);
+    const performerWords = performerNorm ? performerNorm.split(" ") : [];
+
     const cityNorm = normText(input.city || "");
     const stateNorm = normText(input.state || "");
     const dateDay = input.date_day ? parseDateDayFromYMD(input.date_day) : null;
     const time24 = input.time_24 || null;
 
     if (!dateDay || !performerNorm || !cityNorm) {
-      // For MVP we require performer+city+date to match an event.
       return res.json({
         confidence: "low",
         reason: "missing_required_fields",
@@ -79,7 +80,8 @@ app.post("/match", async (req, res) => {
       });
     }
 
-    // Pipeline: performer -> city -> date -> state(if present) -> time(if duplicates and present)
+    // Core matching logic:
+    // ALL words from performer_query must be present in performerNorm
     const baseWhere = {
       dateDay,
       cityNorm,
@@ -87,7 +89,9 @@ app.post("/match", async (req, res) => {
       performers: {
         some: {
           performer: {
-            performerNorm: { contains: performerNorm }
+            AND: performerWords.map(w => ({
+              performerNorm: { contains: w }
+            }))
           }
         }
       }
@@ -102,24 +106,6 @@ app.post("/match", async (req, res) => {
       take: 25
     });
 
-    // If nothing matched by contains-performerNorm, relax performer contains a bit:
-    // (This is still deterministic and safe; can be upgraded later.)
-    if (!events.length) {
-      events = await prisma.event.findMany({
-        where: {
-          dateDay,
-          cityNorm,
-          ...(stateNorm ? { stateNorm } : {}),
-          performers: { some: { performer: { performerNorm: { contains: performerNorm.split(" ")[0] } } } }
-        },
-        include: {
-          offers: true,
-          performers: { include: { performer: true } }
-        },
-        take: 25
-      });
-    }
-
     if (!events.length) {
       return res.json({
         confidence: "low",
@@ -128,7 +114,7 @@ app.post("/match", async (req, res) => {
       });
     }
 
-    // If duplicates remain and we have time from page: tie-breaker by time24
+    // Tie-breaker by time if needed
     let filtered = events;
     if (events.length > 1 && time24) {
       const byTime = events.filter(e => (e.time24 || "") === time24);
@@ -166,7 +152,9 @@ function shapeEvent(e) {
     return Number(ax) - Number(bx);
   });
 
-  const performerNames = (e.performers || []).map(ep => ep.performer?.name).filter(Boolean);
+  const performerNames = (e.performers || [])
+    .map(ep => ep.performer?.name)
+    .filter(Boolean);
 
   return {
     event_id: e.id,
