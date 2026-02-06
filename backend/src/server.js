@@ -36,6 +36,12 @@ function normText(s) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+/**
+ * =========
+ * City cleanup helpers
+ * =========
+ */
 function stripLeadingTime(s) {
   let t = String(s || "").trim();
 
@@ -49,25 +55,45 @@ function stripLeadingTime(s) {
 }
 
 function cityCandidateFromMessyString(s) {
-  let t = stripLeadingTime(s);
+  let t = String(s || "").trim();
+  if (!t) return null;
 
-  // убрать дни недели
-  t = t.replace(/\b(mon|tue|wed|thu|fri|sat|sun)\b/gi, "");
-  // убрать месяцы
-  t = t.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/gi, "");
-  // убрать числа дат
-  t = t.replace(/\b\d{1,2}(st|nd|rd|th)?\b/gi, "");
+  // 1) если это "02:00 PM Idaho Falls" — уберём время
+  t = stripLeadingTime(t);
+
+  // 2) если внутри есть "Tickets" — берем всё, что ПОСЛЕ него
+  // (Post Malone ... Tickets 2026-05-13 El Paso -> "2026-05-13 El Paso")
+  const mTickets = /\btickets\b/i.exec(t);
+  if (mTickets) {
+    t = t.slice(mTickets.index + mTickets[0].length).trim();
+  }
+
+  // 3) убираем ISO дату YYYY-MM-DD (самый частый мусор)
+  t = t.replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
+
+  // 4) убрать дни недели/месяцы/числа дат (на всякий)
+  t = t.replace(/\b(mon|tue|wed|thu|fri|sat|sun)\b/gi, " ");
+  t = t.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/gi, " ");
+  t = t.replace(/\b\d{1,2}(st|nd|rd|th)?\b/gi, " ");
+
+  // 5) убрать явные шум-слова (иногда в city прилетает кусок заголовка)
+  // NOTE: тут сознательно короткий список, чтобы не вырезать настоящие города
+  t = t.replace(/\b(presents?|tour|part|show|stadium|arena|the|big|ass|tickets?)\b/gi, " ");
 
   t = t.replace(/\s+/g, " ").trim();
 
   const parts = t.split(" ").filter(Boolean);
-
   if (parts.length === 0) return null;
   if (parts.length <= 3) return t;
 
-  // берём последние 3 слова
-  return parts.slice(-3).join(" ");
+  // если всё ещё длинно — берём последние 2-3 слова (чаще всего это и есть город)
+  const last2 = parts.slice(-2).join(" ");
+  const last3 = parts.slice(-3).join(" ");
+  // если last2 выглядит адекватно (только буквы/пробелы) — предпочтем его
+  if (/^[a-zA-Z\s]+$/.test(last2)) return last2;
+  return last3;
 }
+
 function loadStateMaps() {
   try {
     if (!fs.existsSync(STATE_CSV_PATH)) {
@@ -242,13 +268,6 @@ function upcomingExcludeWhere() {
  * =========
  * Performer query degradation
  * =========
- * Goal: handle cases like "Jeff Dunham Artificial Intelligence"
- * when DB has just "Jeff Dunham"
- *
- * Strategy:
- * - Start with ALL words
- * - If no match: shrink by removing the last word, step by step
- * - Allow going down to 1 word, BUT with safeguards
  */
 const STOP_WORDS = new Set([
   "tickets",
@@ -280,50 +299,67 @@ function buildWordVariants(words, mode) {
   // mode: "exact" | "upcoming"
   const w = (words || []).map(x => String(x).trim()).filter(Boolean);
   const variants = [];
-
   if (!w.length) return variants;
 
-  // Generate prefixes: [w0..wn], [w0..w(n-1)], ... [w0]
-  for (let k = w.length; k >= 1; k--) {
+  const seen = new Set();
+  const push = (arr) => {
+    if (!arr || !arr.length) return;
+    const key = arr.join(" ");
+    if (seen.has(key)) return;
+    seen.add(key);
+    variants.push(arr);
+  };
+
+  // 0) full
+  push(w);
+
+  // 1) prefixes: [w0..wn], [w0..w(n-1)], ... [w0]
+  for (let k = w.length - 1; k >= 1; k--) {
     const v = w.slice(0, k);
 
     if (v.length === 1) {
       const one = v[0].toLowerCase();
 
-      // Stop word? never
       if (isStopWord(one)) continue;
 
-      // Too short => allow only in exact (date+city already narrows)
       if (one.length < 3) {
-        if (mode === "exact") {
-          variants.push(v);
-        }
+        if (mode === "exact") push(v);
         continue;
       }
 
-      // In upcoming-mode be a bit stricter for 1-word to avoid noise
-      // (still allows one-word artists like "sting", "madonna", etc.)
       if (mode === "upcoming") {
-        // if length >= 4 — ok
-        if (one.length >= 4) variants.push(v);
+        if (one.length >= 4) push(v);
         continue;
       }
     }
 
-    variants.push(v);
+    push(v);
   }
 
-  // De-dupe (defensive)
-  const seen = new Set();
-  const out = [];
-  for (const v of variants) {
-    const key = v.join(" ");
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(v);
+  // 2) suffixes: [w1..wn], [w2..wn], ... [wn]
+  for (let i = 1; i <= w.length - 1; i++) {
+    const v = w.slice(i);
+
+    if (v.length === 1) {
+      const one = v[0].toLowerCase();
+
+      if (isStopWord(one)) continue;
+
+      if (one.length < 3) {
+        if (mode === "exact") push(v);
+        continue;
+      }
+
+      if (mode === "upcoming") {
+        if (one.length >= 4) push(v);
+        continue;
+      }
+    }
+
+    push(v);
   }
 
-  return out;
+  return variants;
 }
 
 function buildPerformerWordClauses(words) {
@@ -366,8 +402,8 @@ app.post("/match", async (req, res) => {
       ? performerNorm.split(" ").filter(Boolean)
       : [];
 
-  const cityClean = cityCandidateFromMessyString(input.city || "");
-  const cityNorm = normText(cityClean || "");
+    const cityClean = cityCandidateFromMessyString(input.city || "");
+    const cityNorm = normText(cityClean || "");
 
     const st = normalizeState(input.state);
     const stateNorm = st?.stateNorm || "";
@@ -553,8 +589,6 @@ app.post("/match", async (req, res) => {
       reason: "upcoming_in_city",
       matches: sliced.map(shapeEvent),
       hint: hasMoreThan3 ? "add date for exact match" : null,
-      // Optional debug hint (safe): shows what words matched (can remove later if you want)
-      // matched_by: usedVariant ? usedVariant.join(" ") : null,
       fallback
     });
   } catch (e) {
