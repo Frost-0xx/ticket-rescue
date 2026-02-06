@@ -207,6 +207,106 @@ function upcomingExcludeWhere() {
   };
 }
 
+/**
+ * =========
+ * Performer query degradation
+ * =========
+ * Goal: handle cases like "Jeff Dunham Artificial Intelligence"
+ * when DB has just "Jeff Dunham"
+ *
+ * Strategy:
+ * - Start with ALL words
+ * - If no match: shrink by removing the last word, step by step
+ * - Allow going down to 1 word, BUT with safeguards
+ */
+const STOP_WORDS = new Set([
+  "tickets",
+  "ticket",
+  "tour",
+  "events",
+  "event",
+  "show",
+  "shows",
+  "live",
+  "official",
+  "presents",
+  "present",
+  "featuring",
+  "feat",
+  "with",
+  "and",
+  "the",
+  "a",
+  "an",
+  "parking"
+]);
+
+function isStopWord(w) {
+  return STOP_WORDS.has(String(w || "").toLowerCase());
+}
+
+function buildWordVariants(words, mode) {
+  // mode: "exact" | "upcoming"
+  const w = (words || []).map(x => String(x).trim()).filter(Boolean);
+  const variants = [];
+
+  if (!w.length) return variants;
+
+  // Generate prefixes: [w0..wn], [w0..w(n-1)], ... [w0]
+  for (let k = w.length; k >= 1; k--) {
+    const v = w.slice(0, k);
+
+    if (v.length === 1) {
+      const one = v[0].toLowerCase();
+
+      // Stop word? never
+      if (isStopWord(one)) continue;
+
+      // Too short => allow only in exact (date+city already narrows)
+      if (one.length < 3) {
+        if (mode === "exact") {
+          variants.push(v);
+        }
+        continue;
+      }
+
+      // In upcoming-mode be a bit stricter for 1-word to avoid noise
+      // (still allows one-word artists like "sting", "madonna", etc.)
+      if (mode === "upcoming") {
+        // if length >= 4 — ok
+        if (one.length >= 4) variants.push(v);
+        continue;
+      }
+    }
+
+    variants.push(v);
+  }
+
+  // De-dupe (defensive)
+  const seen = new Set();
+  const out = [];
+  for (const v of variants) {
+    const key = v.join(" ");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+
+  return out;
+}
+
+function buildPerformerWordClauses(words) {
+  return words.map((w) => ({
+    performerNorm: { contains: w, mode: "insensitive" }
+  }));
+}
+
+function buildEventNameClauses(words) {
+  return words.map((w) => ({
+    eventName: { contains: w, mode: "insensitive" }
+  }));
+}
+
 const MatchRequest = z.object({
   performer_query: z.string().optional().nullable(),
   raw_title: z.string().optional().nullable(),
@@ -223,7 +323,8 @@ app.post("/match", async (req, res) => {
     const input = MatchRequest.parse(req.body);
 
     // Option C: prefer performer_query, else extract from raw_title
-    const performerFromQuery = String(input.performer_query || "").trim() || null;
+    const performerFromQuery =
+      String(input.performer_query || "").trim() || null;
     const performerFromTitle = input.raw_title
       ? extractPerformerFromTitle(input.raw_title)
       : null;
@@ -274,125 +375,136 @@ app.post("/match", async (req, res) => {
     }
 
     /**
+     * Helper: apply time tie-break (only when multiple results and time24 provided)
+     */
+    function applyTimeTiebreak(events) {
+      let filtered = events;
+      if (events.length > 1 && time24) {
+        const byTime = events.filter((e) => (e.time24 || "") === time24);
+        if (byTime.length) filtered = byTime;
+      }
+      return filtered;
+    }
+
+    /**
      * ================
      * Mode 1: Exact-ish event match (performer + city + date)
+     * - Degrade performer words down to 1 word with safeguards (exact mode is more permissive)
+     * - Try join match first, then eventName fallback per variant
      * ================
      */
     if (dateDay) {
-      // 1) Primary: match by Performer join (ALL words, case-insensitive)
-      const performerWhere = {
-        dateDay,
-        cityNorm,
-        ...(stateNorm ? { stateNorm } : {}),
-        performers: {
-          some: {
-            performer: {
-              AND: performerWords.map((w) => ({
-                performerNorm: { contains: w, mode: "insensitive" }
-              }))
+      const variants = buildWordVariants(performerWords, "exact");
+
+      for (const words of variants) {
+        // 1) Primary: match by Performer join (ALL words, case-insensitive)
+        const performerWhere = {
+          dateDay,
+          cityNorm,
+          ...(stateNorm ? { stateNorm } : {}),
+          performers: {
+            some: {
+              performer: {
+                AND: buildPerformerWordClauses(words)
+              }
             }
           }
-        }
-      };
+        };
 
-      let events = await prisma.event.findMany({
-        where: performerWhere,
-        include: { offers: true, performers: { include: { performer: true } } },
-        take: 25
-      });
-
-      // 2) Fallback: match by Event title text (ALL words, case-insensitive)
-      if (!events.length) {
-        const eventNameClauses = performerWords.map((w) => ({
-          eventName: { contains: w, mode: "insensitive" }
-        }));
-
-        events = await prisma.event.findMany({
-          where: {
-            dateDay,
-            cityNorm,
-            ...(stateNorm ? { stateNorm } : {}),
-            AND: eventNameClauses
-          },
+        let events = await prisma.event.findMany({
+          where: performerWhere,
           include: { offers: true, performers: { include: { performer: true } } },
           take: 25
         });
-      }
 
-      if (events.length) {
-        // Tie-breaker by time if needed
-        let filtered = events;
-        if (events.length > 1 && time24) {
-          const byTime = events.filter((e) => (e.time24 || "") === time24);
-          if (byTime.length) filtered = byTime;
+        // 2) Fallback: match by Event title text (ALL words, case-insensitive)
+        if (!events.length) {
+          events = await prisma.event.findMany({
+            where: {
+              dateDay,
+              cityNorm,
+              ...(stateNorm ? { stateNorm } : {}),
+              AND: buildEventNameClauses(words)
+            },
+            include: { offers: true, performers: { include: { performer: true } } },
+            take: 25
+          });
         }
 
-        return res.json({
-          confidence: filtered.length === 1 ? "high" : "medium",
-          reason: filtered.length === 1 ? "exact_or_tiebroken" : "multiple",
-          matches: filtered.map(shapeEvent),
-          fallback
-        });
+        if (events.length) {
+          const filtered = applyTimeTiebreak(events);
+          return res.json({
+            confidence: filtered.length === 1 ? "high" : "medium",
+            reason: filtered.length === 1 ? "exact_or_tiebroken" : "multiple",
+            matches: filtered.map(shapeEvent),
+            fallback
+          });
+        }
       }
-      // If exact match failed, fall through to upcoming mode
+      // If exact match failed for all variants, fall through to upcoming mode
     }
 
     /**
      * ================
      * Mode 2: Upcoming events (performer + city, no date OR date was past OR exact failed)
+     * - Degrade performer words down to 1 word with safeguards (upcoming mode stricter)
      * - return up to 3 closest future events
      * - if more than 3 exist -> hint "add date for exact match"
      * Soft filter: exclude "parking" in upcoming mode only.
      * ================
      */
     const upcomingSoft = upcomingExcludeWhere();
+    const variants = buildWordVariants(performerWords, "upcoming");
 
-    const upcomingWhereByPerformer = {
-      cityNorm,
-      ...(stateNorm ? { stateNorm } : {}),
-      dateDay: { gte: today },
-      ...upcomingSoft,
-      performers: {
-        some: {
-          performer: {
-            AND: performerWords.map((w) => ({
-              performerNorm: { contains: w, mode: "insensitive" }
-            }))
+    let upcoming = [];
+    let usedVariant = null;
+
+    for (const words of variants) {
+      const upcomingWhereByPerformer = {
+        cityNorm,
+        ...(stateNorm ? { stateNorm } : {}),
+        dateDay: { gte: today },
+        ...upcomingSoft,
+        performers: {
+          some: {
+            performer: {
+              AND: buildPerformerWordClauses(words)
+            }
           }
         }
-      }
-    };
+      };
 
-    // We'll ask for 4 to detect "more than 3"
-    let upcoming = await prisma.event.findMany({
-      where: upcomingWhereByPerformer,
-      include: { offers: true, performers: { include: { performer: true } } },
-      orderBy: [{ dateDay: "asc" }, { time24: "asc" }],
-      take: 4
-    });
-
-    // If nothing by performer join, try fallback by eventName contains
-    if (!upcoming.length) {
-      const eventNameClauses = performerWords.map((w) => ({
-        eventName: { contains: w, mode: "insensitive" }
-      }));
-
+      // We'll ask for 4 to detect "more than 3"
       upcoming = await prisma.event.findMany({
-        where: {
-          cityNorm,
-          ...(stateNorm ? { stateNorm } : {}),
-          dateDay: { gte: today },
-          ...upcomingSoft,
-          AND: eventNameClauses
-        },
+        where: upcomingWhereByPerformer,
         include: { offers: true, performers: { include: { performer: true } } },
         orderBy: [{ dateDay: "asc" }, { time24: "asc" }],
         take: 4
       });
+
+      // If nothing by performer join, try fallback by eventName contains
+      if (!upcoming.length) {
+        upcoming = await prisma.event.findMany({
+          where: {
+            cityNorm,
+            ...(stateNorm ? { stateNorm } : {}),
+            dateDay: { gte: today },
+            ...upcomingSoft,
+            AND: buildEventNameClauses(words)
+          },
+          include: { offers: true, performers: { include: { performer: true } } },
+          orderBy: [{ dateDay: "asc" }, { time24: "asc" }],
+          take: 4
+        });
+      }
+
+      if (upcoming.length) {
+        usedVariant = words;
+        break;
+      }
     }
 
     if (!upcoming.length) {
-      // Nothing upcoming found => performer links only (already in fallback)
       return res.json({
         confidence: "low",
         reason: "no_upcoming_in_city",
@@ -409,6 +521,8 @@ app.post("/match", async (req, res) => {
       reason: "upcoming_in_city",
       matches: sliced.map(shapeEvent),
       hint: hasMoreThan3 ? "add date for exact match" : null,
+      // Optional debug hint (safe): shows what words matched (can remove later if you want)
+      // matched_by: usedVariant ? usedVariant.join(" ") : null,
       fallback
     });
   } catch (e) {
