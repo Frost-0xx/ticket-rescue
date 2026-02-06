@@ -36,7 +36,38 @@ function normText(s) {
     .replace(/\s+/g, " ")
     .trim();
 }
+function stripLeadingTime(s) {
+  let t = String(s || "").trim();
 
+  // 12h: 02:00 PM / 2:00PM
+  t = t.replace(/^\s*\d{1,2}:\d{2}\s*(AM|PM)\s+/i, "");
+
+  // 24h: 02:00 / 19:30
+  t = t.replace(/^\s*\d{1,2}:\d{2}\s+/, "");
+
+  return t.trim();
+}
+
+function cityCandidateFromMessyString(s) {
+  let t = stripLeadingTime(s);
+
+  // убрать дни недели
+  t = t.replace(/\b(mon|tue|wed|thu|fri|sat|sun)\b/gi, "");
+  // убрать месяцы
+  t = t.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/gi, "");
+  // убрать числа дат
+  t = t.replace(/\b\d{1,2}(st|nd|rd|th)?\b/gi, "");
+
+  t = t.replace(/\s+/g, " ").trim();
+
+  const parts = t.split(" ").filter(Boolean);
+
+  if (parts.length === 0) return null;
+  if (parts.length <= 3) return t;
+
+  // берём последние 3 слова
+  return parts.slice(-3).join(" ");
+}
 function loadStateMaps() {
   try {
     if (!fs.existsSync(STATE_CSV_PATH)) {
@@ -335,7 +366,8 @@ app.post("/match", async (req, res) => {
       ? performerNorm.split(" ").filter(Boolean)
       : [];
 
-    const cityNorm = normText(input.city || "");
+  const cityClean = cityCandidateFromMessyString(input.city || "");
+  const cityNorm = normText(cityClean || "");
 
     const st = normalizeState(input.state);
     const stateNorm = st?.stateNorm || "";
