@@ -74,6 +74,7 @@ model Offer {
   ticketsYn     Boolean?
 
   promoPercent  Int?     // nullable
+  promoCode    String?
   lastSeenAt    DateTime @default(now())
 
   event         Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
