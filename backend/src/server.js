@@ -94,6 +94,49 @@ function cityCandidateFromMessyString(s) {
   return last3;
 }
 
+/**
+ * City variants:
+ * - handle Fort <-> Ft
+ * - handle Saint <-> St
+ * - handle specific aliases (West Valley City -> Salt Lake City)
+ */
+const CITY_ALIASES = new Map([
+  ["west valley city", ["salt lake city"]]
+]);
+
+function cityVariants(rawCity) {
+  const cleaned = cityCandidateFromMessyString(rawCity || "");
+  const base = normText(cleaned || "");
+  if (!base) return [];
+
+  const out = new Set();
+  out.add(base);
+
+  // aliases
+  const ali = CITY_ALIASES.get(base);
+  if (ali && Array.isArray(ali)) {
+    for (const a of ali) {
+      const nn = normText(a);
+      if (nn) out.add(nn);
+    }
+  }
+
+  // ft <-> fort, st <-> saint (only first token)
+  const parts = base.split(" ").filter(Boolean);
+  if (parts.length >= 2) {
+    const head = parts[0];
+    const tail = parts.slice(1).join(" ");
+
+    if (head === "ft") out.add(`fort ${tail}`);
+    if (head === "fort") out.add(`ft ${tail}`);
+
+    if (head === "st") out.add(`saint ${tail}`);
+    if (head === "saint") out.add(`st ${tail}`);
+  }
+
+  return Array.from(out);
+}
+
 function loadStateMaps() {
   try {
     if (!fs.existsSync(STATE_CSV_PATH)) {
@@ -253,6 +296,44 @@ function extractPerformerFromTitle(rawTitle) {
 
 /**
  * =========
+ * Performer cleanup
+ * =========
+ * Fix cases like:
+ * - "The Hondo Rodeo Fest - 3 Day Package"
+ * - "2026 MEAC ... Mar 11-14, 2026, Sess 1-7"
+ */
+const MONTH_TOKEN_RE = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i;
+
+function cleanPerformerPicked(s) {
+  let t = String(s || "").trim();
+  if (!t) return null;
+
+  // Remove leading "The "
+  t = t.replace(/^\s*the\s+/i, "");
+
+  // If a month appears, everything after it is usually date/garbage in titles
+  const mMonth = MONTH_TOKEN_RE.exec(t);
+  if (mMonth) {
+    t = t.slice(0, mMonth.index).trim();
+  }
+
+  // Remove "3 Day Package", "Day Package", "Package"
+  t = t.replace(/\b\d+\s*day\s*package\b/gi, " ");
+  t = t.replace(/\bday\s*package\b/gi, " ");
+  t = t.replace(/\bpackage\b/gi, " ");
+
+  // Remove session tokens
+  t = t.replace(/\b(sess(ion)?)\b[^,]*$/gi, " ");
+  t = t.replace(/\b(sess(ion)?)\s*\d+(-\d+)?\b/gi, " ");
+
+  // Collapse spaces
+  t = t.replace(/\s+/g, " ").trim();
+
+  return t || null;
+}
+
+/**
+ * =========
  * UPCOMING soft filters (MVP)
  * =========
  * Exclude "Parking" listings ONLY in upcoming-mode (no-date).
@@ -288,16 +369,33 @@ const STOP_WORDS = new Set([
   "the",
   "a",
   "an",
-  "parking"
+  "parking",
+  "day",
+  "package",
+  "sess",
+  "session"
 ]);
 
 function isStopWord(w) {
   return STOP_WORDS.has(String(w || "").toLowerCase());
 }
 
+function isYearToken(w) {
+  const s = String(w || "").trim();
+  return /^((19|20)\d{2})$/.test(s);
+}
+
+function filterPerformerWords(words) {
+  return (words || [])
+    .map((x) => String(x).trim())
+    .filter(Boolean)
+    .filter((w) => !isStopWord(w))
+    .filter((w) => !isYearToken(w));
+}
+
 function buildWordVariants(words, mode) {
   // mode: "exact" | "upcoming"
-  const w = (words || []).map(x => String(x).trim()).filter(Boolean);
+  const w = (words || []).map((x) => String(x).trim()).filter(Boolean);
   const variants = [];
   if (!w.length) return variants;
 
@@ -313,14 +411,14 @@ function buildWordVariants(words, mode) {
   // 0) full
   push(w);
 
-  // 1) prefixes: [w0..wn], [w0..w(n-1)], ... [w0]
+  // 1) prefixes: [w0..w(k)]
   for (let k = w.length - 1; k >= 1; k--) {
     const v = w.slice(0, k);
 
     if (v.length === 1) {
       const one = v[0].toLowerCase();
 
-      if (isStopWord(one)) continue;
+      if (isStopWord(one) || isYearToken(one)) continue;
 
       if (one.length < 3) {
         if (mode === "exact") push(v);
@@ -336,14 +434,14 @@ function buildWordVariants(words, mode) {
     push(v);
   }
 
-  // 2) suffixes: [w1..wn], [w2..wn], ... [wn]
+  // 2) suffixes: [w(i)..wn]
   for (let i = 1; i <= w.length - 1; i++) {
     const v = w.slice(i);
 
     if (v.length === 1) {
       const one = v[0].toLowerCase();
 
-      if (isStopWord(one)) continue;
+      if (isStopWord(one) || isYearToken(one)) continue;
 
       if (one.length < 3) {
         if (mode === "exact") push(v);
@@ -390,20 +488,23 @@ app.post("/match", async (req, res) => {
     const input = MatchRequest.parse(req.body);
 
     // Option C: prefer performer_query, else extract from raw_title
-    const performerFromQuery =
-      String(input.performer_query || "").trim() || null;
+    const performerFromQuery = String(input.performer_query || "").trim() || null;
     const performerFromTitle = input.raw_title
       ? extractPerformerFromTitle(input.raw_title)
       : null;
-    const performerPicked = performerFromQuery || performerFromTitle || null;
 
+    // Clean performer string before matching variants
+    const performerPickedRaw = performerFromQuery || performerFromTitle || null;
+    const performerPicked = performerPickedRaw ? (cleanPerformerPicked(performerPickedRaw) || performerPickedRaw) : null;
+
+    // Build words (then filter stopwords/years immediately)
     const performerNorm = normText(performerPicked || "");
-    const performerWords = performerNorm
-      ? performerNorm.split(" ").filter(Boolean)
-      : [];
+    let performerWords = performerNorm ? performerNorm.split(" ").filter(Boolean) : [];
+    performerWords = filterPerformerWords(performerWords);
 
-    const cityClean = cityCandidateFromMessyString(input.city || "");
-    const cityNorm = normText(cityClean || "");
+    // City variants
+    const cityNormVariants = cityVariants(input.city || "");
+    const cityNorm = cityNormVariants[0] || "";
 
     const st = normalizeState(input.state);
     const stateNorm = st?.stateNorm || "";
@@ -442,6 +543,8 @@ app.post("/match", async (req, res) => {
       });
     }
 
+    const cityOr = cityNormVariants.map((c) => ({ cityNorm: c }));
+
     /**
      * Helper: apply time tie-break (only when multiple results and time24 provided)
      */
@@ -457,8 +560,6 @@ app.post("/match", async (req, res) => {
     /**
      * ================
      * Mode 1: Exact-ish event match (performer + city + date)
-     * - Degrade performer words down to 1 word with safeguards (exact mode is more permissive)
-     * - Try join match first, then eventName fallback per variant
      * ================
      */
     if (dateDay) {
@@ -468,15 +569,19 @@ app.post("/match", async (req, res) => {
         // 1) Primary: match by Performer join (ALL words, case-insensitive)
         const performerWhere = {
           dateDay,
-          cityNorm,
           ...(stateNorm ? { stateNorm } : {}),
-          performers: {
-            some: {
-              performer: {
-                AND: buildPerformerWordClauses(words)
+          AND: [
+            { OR: cityOr },
+            {
+              performers: {
+                some: {
+                  performer: {
+                    AND: buildPerformerWordClauses(words)
+                  }
+                }
               }
             }
-          }
+          ]
         };
 
         let events = await prisma.event.findMany({
@@ -490,9 +595,8 @@ app.post("/match", async (req, res) => {
           events = await prisma.event.findMany({
             where: {
               dateDay,
-              cityNorm,
               ...(stateNorm ? { stateNorm } : {}),
-              AND: buildEventNameClauses(words)
+              AND: [{ OR: cityOr }, ...buildEventNameClauses(words)]
             },
             include: { offers: true, performers: { include: { performer: true } } },
             take: 25
@@ -515,34 +619,32 @@ app.post("/match", async (req, res) => {
     /**
      * ================
      * Mode 2: Upcoming events (performer + city, no date OR date was past OR exact failed)
-     * - Degrade performer words down to 1 word with safeguards (upcoming mode stricter)
-     * - return up to 3 closest future events
-     * - if more than 3 exist -> hint "add date for exact match"
-     * Soft filter: exclude "parking" in upcoming mode only.
      * ================
      */
     const upcomingSoft = upcomingExcludeWhere();
     const variants = buildWordVariants(performerWords, "upcoming");
 
     let upcoming = [];
-    let usedVariant = null;
 
     for (const words of variants) {
       const upcomingWhereByPerformer = {
-        cityNorm,
         ...(stateNorm ? { stateNorm } : {}),
         dateDay: { gte: today },
         ...upcomingSoft,
-        performers: {
-          some: {
-            performer: {
-              AND: buildPerformerWordClauses(words)
+        AND: [
+          { OR: cityOr },
+          {
+            performers: {
+              some: {
+                performer: {
+                  AND: buildPerformerWordClauses(words)
+                }
+              }
             }
           }
-        }
+        ]
       };
 
-      // We'll ask for 4 to detect "more than 3"
       upcoming = await prisma.event.findMany({
         where: upcomingWhereByPerformer,
         include: { offers: true, performers: { include: { performer: true } } },
@@ -554,11 +656,10 @@ app.post("/match", async (req, res) => {
       if (!upcoming.length) {
         upcoming = await prisma.event.findMany({
           where: {
-            cityNorm,
             ...(stateNorm ? { stateNorm } : {}),
             dateDay: { gte: today },
             ...upcomingSoft,
-            AND: buildEventNameClauses(words)
+            AND: [{ OR: cityOr }, ...buildEventNameClauses(words)]
           },
           include: { offers: true, performers: { include: { performer: true } } },
           orderBy: [{ dateDay: "asc" }, { time24: "asc" }],
@@ -566,10 +667,7 @@ app.post("/match", async (req, res) => {
         });
       }
 
-      if (upcoming.length) {
-        usedVariant = words;
-        break;
-      }
+      if (upcoming.length) break;
     }
 
     if (!upcoming.length) {
